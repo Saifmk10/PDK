@@ -1,0 +1,3 @@
+# Voice
+
+`commands.ts` maps Gemini Live input transcriptions to the app's overview, finance, and health destinations. `geminiLiveSession.ts` owns the direct Gemini Live WebSocket, PCM audio input/output, live transcripts, automatic language switching, and interruption handling. `base64.ts` encodes PCM chunks for the WebSocket protocol. The microphone UI and SecureStore API-key controls live in `../components/VoiceAssistantButton.tsx`. No device STT or device TTS model is used.

@@ -1,0 +1,3 @@
+# Components
+
+Reusable interface elements live here. `BottomNavigation.tsx` provides touch navigation, `VoiceAssistantButton.tsx` owns the floating glass Gemini Live conversation UI, Expo PCM microphone capture, streamed audio states, secure API-key controls, and `RecordEditorModal.tsx` handles create and edit forms for both ledgers. The assistant uses Expo Blur for its translucent panel. Speech recognition and generated speech both come from Gemini Live.

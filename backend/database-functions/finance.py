@@ -17,6 +17,7 @@ def create_schema():
     connection.commit()
     connection.close()
 
+# create_schema()
 
 def add_expense(expense_category, amount, date, description):
     connection = sqlite3.connect("../database.db")
@@ -25,6 +26,7 @@ def add_expense(expense_category, amount, date, description):
     connection.commit()
     connection.close()
 
+# add_expense("Food", 12.5, "2024-06-01", "Lunch at cafe")
 
 def remove_expense(expense_category, amount, date, description):
     connection = sqlite3.connect("../database.db")
@@ -33,7 +35,18 @@ def remove_expense(expense_category, amount, date, description):
     connection.commit()
     connection.close()
 
-# add_expense("Food", 12.5, "2024-06-01", "Lunch at cafe")
+
+def get_expenses():
+    connection = sqlite3.connect("../database.db")
+    cursor = connection.cursor()
+    cursor.execute("SELECT * FROM finance")
+    expenses = cursor.fetchall()
+    connection.close()
+    return expenses
+
+# print(get_expenses())
+
+
 
 
 
@@ -46,6 +59,11 @@ def api_add_expense(expense_category: str, amount: float, date: str, description
 def api_remove_expense(expense_category: str, amount: float, date: str, description: str):
     remove_expense(expense_category, amount, date, description)
     return {"message": "Expense removed successfully"}
+
+@app.get("/get_expenses")
+def api_get_expenses():
+    expenses = get_expenses()
+    return {"expenses": expenses}
 
 
 # example payload

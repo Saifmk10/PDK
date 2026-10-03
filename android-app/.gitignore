@@ -38,9 +38,6 @@ yarn-error.*
 !.env.example
 .env*.local
 
-# local finance database
-database/database.db
-
 # Python cache files
 __pycache__/
 *.py[cod]

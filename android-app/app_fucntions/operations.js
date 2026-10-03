@@ -1,5 +1,9 @@
 "use strict";
-const response = await fetch("http://localhost:8000/expenses", {
+const financeApiUrl = process.env.EXPO_PUBLIC_FINANCE_API_URL;
+if (!financeApiUrl) {
+    throw new Error("EXPO_PUBLIC_FINANCE_API_URL is not configured.");
+}
+const response = await fetch(`${financeApiUrl.replace(/\/+$/, "")}/expenses`, {
     method: "POST",
     headers: {
         "Content-Type": "application/json",

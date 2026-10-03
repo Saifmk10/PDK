@@ -1,6 +1,12 @@
 // import { Float } from "react-native/Libraries/Types/CodegenTypes";
 
-const financeApiUrl = 'http://127.0.0.1:8000';
+function getFinanceApiUrl(): string {
+  const financeApiUrl = process.env.EXPO_PUBLIC_FINANCE_API_URL;
+  if (!financeApiUrl) {
+    throw new Error('EXPO_PUBLIC_FINANCE_API_URL is not configured.');
+  }
+  return financeApiUrl.replace(/\/+$/, '');
+}
 
 
 // function input_from_model_expenditure(expense_category:string , amount:Float , date:Date , description:String ){
@@ -23,7 +29,7 @@ export async function add_expense(expense_category: string, amount: number, date
       date,
       description,
     });
-    const response = await fetch(`${financeApiUrl}/add_expense?${params}`, {
+    const response = await fetch(`${getFinanceApiUrl()}/add_expense?${params}`, {
     method: "POST",
     });
 
@@ -45,7 +51,7 @@ async function remove_expense(expense_category: string, amount: number, date: st
       date,
       description,
     });
-    const response = await fetch(`http://127.0.0.1:8000/remove_expense?${params}`, {
+    const response = await fetch(`${getFinanceApiUrl()}/remove_expense?${params}`, {
     method: "POST",
     });
 

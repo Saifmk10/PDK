@@ -1,3 +1,3 @@
 # Android PCM Output
 
-The `src/main/java/expo/modules/gemineliveaudio/` implementation wraps Android `AudioTrack` in streaming mode. It accepts Gemini Live's mono 16-bit PCM response chunks, flushes queued playback for barge-in, and releases the track when the voice session ends.
+The `src/main/java/expo/modules/gemineliveaudio/` implementation wraps Android `AudioTrack` in streaming mode and captures mono 16-bit microphone PCM with `AudioRecord` using `VOICE_COMMUNICATION`. It enables Android `AcousticEchoCanceler` when available, emits capture buffers to JavaScript, flushes queued playback for barge-in, and releases both streams when the voice session ends.

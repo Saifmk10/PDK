@@ -105,6 +105,8 @@ export function RecordEditorModal({ visible, kind, entry, onClose, onSave }: Pro
         };
         await onSave(draft);
       }
+    } catch (error) {
+      Alert.alert('Could not save record', error instanceof Error ? error.message : 'Please try again.');
     } finally {
       setSaving(false);
     }
@@ -141,7 +143,7 @@ export function RecordEditorModal({ visible, kind, entry, onClose, onSave }: Pro
                   ))}
                 </View>
                 <Field label="DESCRIPTION" value={title} onChangeText={setTitle} placeholder="e.g. Weekly groceries" />
-                <Field label="AMOUNT" value={amount} onChangeText={setAmount} placeholder="0.00" keyboardType="decimal-pad" prefix="$" />
+                <Field label="AMOUNT" value={amount} onChangeText={setAmount} placeholder="0.00" keyboardType="decimal-pad" prefix="₹" />
                 <Text style={styles.fieldLabel}>CATEGORY</Text>
                 <View style={styles.options}>
                   {categories.map((option) => <Option key={option} label={option} selected={category === option} onPress={() => setCategory(option)} />)}

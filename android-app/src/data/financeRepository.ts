@@ -2,9 +2,9 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import type { FinanceDraft, FinanceTransaction } from './types';
 
-export function listTransactions(database: SQLiteDatabase) {
+export function listIncomeTransactions(database: SQLiteDatabase) {
   return database.getAllAsync<FinanceTransaction>(
-    'SELECT id, title, amount, type, category, date, note FROM transactions ORDER BY date DESC, rowid DESC',
+    "SELECT id, title, amount, type, category, date, note FROM transactions WHERE type = 'income' ORDER BY date DESC, rowid DESC",
   );
 }
 

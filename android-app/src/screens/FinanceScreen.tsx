@@ -5,20 +5,23 @@ import { colors, type } from '../theme/palette';
 
 type Props = {
   transactions: FinanceTransaction[];
+  loading: boolean;
+  loadError: string | null;
+  onRefresh: () => void;
   onAdd: () => void;
   onEdit: (entry: FinanceTransaction) => void;
   onDelete: (id: string) => void;
 };
 
 function currency(amount: number) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(amount);
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 }
 
 function formatDate(value: string) {
   return new Date(`${value}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export function FinanceScreen({ transactions, onAdd, onEdit, onDelete }: Props) {
+export function FinanceScreen({ transactions, loading, loadError, onRefresh, onAdd, onEdit, onDelete }: Props) {
   const currentMonth = new Date().toISOString().slice(0, 7);
   const monthRecords = transactions.filter((entry) => entry.date.startsWith(currentMonth));
   const income = monthRecords.filter((entry) => entry.type === 'income').reduce((sum, entry) => sum + entry.amount, 0);
@@ -44,9 +47,19 @@ export function FinanceScreen({ transactions, onAdd, onEdit, onDelete }: Props) 
         <Text style={styles.sectionTitle}>Transactions <Text style={styles.count}>/ {transactions.length}</Text></Text>
         <Pressable accessibilityRole="button" onPress={onAdd} style={styles.addButton}><Text style={styles.addMark}>+</Text><Text style={styles.addLabel}>ADD</Text></Pressable>
       </View>
-      {transactions.length ? transactions.map((entry) => (
+      {loadError ? (
+        <View style={styles.loadError}>
+          <Text style={styles.loadErrorText}>{loadError}</Text>
+          <Pressable accessibilityRole="button" onPress={onRefresh}><Text style={styles.retryText}>RETRY</Text></Pressable>
+        </View>
+      ) : null}
+      {loading && transactions.length === 0 ? (
+        <Text style={styles.statusText}>Loading transactions…</Text>
+      ) : loadError && transactions.length === 0 ? (
+        <Text style={styles.statusText}>Transactions could not be loaded.</Text>
+      ) : transactions.length ? transactions.map((entry) => (
         <View key={entry.id} style={styles.row}>
-          <Pressable accessibilityRole="button" onPress={() => onEdit(entry)} style={styles.rowMain}>
+          <Pressable accessibilityRole="button" accessibilityState={{ disabled: entry.source === 'api' }} disabled={entry.source === 'api'} onPress={() => onEdit(entry)} style={styles.rowMain}>
             <View style={[styles.rowSignal, entry.type === 'income' && styles.rowSignalIncome]} />
             <View style={styles.rowCopy}>
               <Text numberOfLines={1} style={styles.rowTitle}>{entry.title}</Text>
@@ -54,7 +67,9 @@ export function FinanceScreen({ transactions, onAdd, onEdit, onDelete }: Props) 
             </View>
             <Text style={[styles.amount, entry.type === 'income' && styles.income]}>{entry.type === 'income' ? '+' : '−'}{currency(entry.amount)}</Text>
           </Pressable>
-          <Pressable accessibilityLabel={`Delete ${entry.title}`} onPress={() => onDelete(entry.id)} style={styles.deleteButton}><Text style={styles.deleteText}>×</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Delete ${entry.title}`} onPress={() => onDelete(entry.id)} style={styles.deleteButton}>
+            <Text style={entry.source === 'api' ? styles.deleteIcon : styles.deleteText}>{entry.source === 'api' ? '🗑' : '×'}</Text>
+          </Pressable>
         </View>
       )) : (
         <View style={styles.emptyState}>
@@ -64,7 +79,7 @@ export function FinanceScreen({ transactions, onAdd, onEdit, onDelete }: Props) 
           <Pressable onPress={onAdd} style={styles.emptyAction}><Text style={styles.emptyActionText}>ADD TRANSACTION  +</Text></Pressable>
         </View>
       )}
-      <Text style={styles.localNote}>STORED ON THIS DEVICE · API CONNECTIONS COMING LATER</Text>
+      <Text style={styles.localNote}>EXPENSES FROM FINANCE API · INCOME STORED ON DEVICE</Text>
     </View>
   );
 }
@@ -100,13 +115,18 @@ const styles = StyleSheet.create({
   rowMeta: { color: colors.muted, fontFamily: type.mono, fontSize: 9 },
   amount: { color: colors.ink, fontFamily: type.mono, fontSize: 12 },
   income: { color: colors.green },
-  deleteButton: { width: 36, height: 42, alignItems: 'flex-end', justifyContent: 'center' },
+  deleteButton: { width: 42, height: 42, alignItems: 'flex-end', justifyContent: 'center' },
   deleteText: { color: colors.muted, fontSize: 22 },
+  deleteIcon: { color: colors.red, fontSize: 18 },
   emptyState: { alignItems: 'flex-start', paddingTop: 25, paddingBottom: 18, gap: 9 },
   emptyMark: { color: colors.red, fontFamily: type.mono, fontSize: 24 },
   emptyTitle: { color: colors.ink, fontFamily: type.medium, fontSize: 20 },
   emptyCopy: { maxWidth: 270, color: colors.muted, fontFamily: type.regular, fontSize: 13, lineHeight: 19 },
   emptyAction: { borderBottomColor: colors.red, borderBottomWidth: 1, paddingBottom: 4, marginTop: 5 },
   emptyActionText: { color: colors.ink, fontFamily: type.mono, fontSize: 10 },
+  loadError: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, paddingVertical: 8 },
+  loadErrorText: { flex: 1, color: colors.red, fontFamily: type.regular, fontSize: 12 },
+  retryText: { color: colors.ink, fontFamily: type.mono, fontSize: 10, textDecorationLine: 'underline' },
+  statusText: { color: colors.muted, fontFamily: type.regular, fontSize: 13, paddingVertical: 20 },
   localNote: { color: colors.muted, fontFamily: type.mono, fontSize: 8, letterSpacing: 0.3, marginTop: 7 },
 });

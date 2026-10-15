@@ -5,6 +5,7 @@ export type HealthMetric = 'steps' | 'sleep' | 'water' | 'workout' | 'weight';
 
 export type FinanceTransaction = {
   id: string;
+  source?: 'api';
   title: string;
   amount: number;
   type: TransactionType;

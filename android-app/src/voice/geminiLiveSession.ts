@@ -1,6 +1,6 @@
 // Owns one Gemini Live WebSocket session and gapless native PCM playback.
 import { GeminiLiveAudio } from '../../modules/gemini-live-audio/src';
-import { add_expense } from '../../app_fucntions/operations';
+import { add_entry } from '../../app_fucntions/operations';
 import { decodeBase64, encodeBase64 } from './base64';
 
 const liveModel = 'gemini-3.8-live';
@@ -8,6 +8,7 @@ const outputSampleRate = 24_000;
 const websocketEndpoint = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
 type LiveCallbacks = {
+  onExpenseAdded: () => Promise<void>;
   onReady: () => void;
   onInputTranscript: (text: string, languageCode: string | undefined, isFinal: boolean) => void;
   onOutputTranscript: (text: string) => void;
@@ -17,9 +18,21 @@ type LiveCallbacks = {
   onError: (message: string) => void;
 };
 
+type ModalityTokenCount = { modality?: string; tokenCount?: number };
+
 type LiveServerMessage = {
   setupComplete?: object;
   error?: { message?: string; code?: number };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    responseTokenCount?: number;
+    totalTokenCount?: number;
+    cachedContentTokenCount?: number;
+    toolUsePromptTokenCount?: number;
+    thoughtsTokenCount?: number;
+    promptTokensDetails?: ModalityTokenCount[];
+    responseTokensDetails?: ModalityTokenCount[];
+  };
   toolCall?: {
     functionCalls?: Array<{
       id: string;
@@ -48,6 +61,8 @@ async function decodeSocketMessage(data: unknown): Promise<string> {
 export class GeminiLiveSession {
   private socket: WebSocket | null = null;
   private closed = false;
+  private playbackSuppressed = false;
+  private readonly conversationId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   constructor(private readonly callbacks: LiveCallbacks) {}
 
@@ -72,22 +87,24 @@ export class GeminiLiveSession {
               responseModalities: ['AUDIO'],
               speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } } },
             },
+            realtimeInputConfig: { activityHandling: 'START_OF_ACTIVITY_INTERRUPTS' },
             systemInstruction: {
-              parts: [{ text: "You are the spoken personal assistant in a personal development app. Converse naturally and warmly. Detect the language from the user's audio and respond in that language. Switch languages naturally whenever the user does. Keep replies concise. The app may navigate between Today, Finance, and Health when asked. When the user clearly asks to record an expense, use the add_expense function. Ask for any missing required details instead of inventing them. Do not claim an expense was saved unless the function succeeds. Do not claim to read or modify health records. Audio is sent continuously; respond to complete turns and allow the user to interrupt you." }],
+              parts: [{ text: "You are the spoken personal assistant in a personal development app. Converse naturally and warmly. Detect the language from the user's audio and respond in that language. Switch languages naturally whenever the user does. Keep replies concise. The app may navigate between Today, Finance, and Health when asked. When the user clearly asks to record an expense or income (such as a salary), use the add_entry function with transaction_type set to expense or income. If the user asks to remove or delete an entry, explain that they must remove it manually with the trash button in Finance to prevent accidental deletion; never attempt to remove an entry through a tool. Ask for any missing required details instead of inventing them. Do not claim an entry was saved unless the function succeeds. Do not claim to read or modify health records. Audio is sent continuously; respond to complete turns and allow the user to interrupt you." }],
             },
             tools: [{
               functionDeclarations: [{
-                name: 'add_expense',
-                description: 'Record an expense in the user\'s finance database. Call only when the user clearly asks to add or record an expense.',
+                name: 'add_entry',
+                description: 'Record an expense or income entry in the user\'s finance database. Call only when the user clearly asks to add or record one.',
                 parameters: {
                   type: 'OBJECT',
                   properties: {
-                    expense_category: { type: 'STRING', description: 'Expense category, such as food, travel, or bills.' },
-                    amount: { type: 'NUMBER', description: 'Expense amount as a positive number.' },
-                    date: { type: 'STRING', description: 'Expense date in YYYY-MM-DD format.' },
-                    description: { type: 'STRING', description: 'Short description of the expense.' },
+                    expense_category: { type: 'STRING', description: 'Category, such as food, travel, bills, or salary.' },
+                    amount: { type: 'NUMBER', description: 'Amount in rupees as a positive number.' },
+                    date: { type: 'STRING', description: 'Entry date in YYYY-MM-DD format.' },
+                    description: { type: 'STRING', description: 'Short description of the entry.' },
+                    transaction_type: { type: 'STRING', enum: ['expense', 'income'], description: 'expense for money spent, income for money received.' },
                   },
-                  required: ['expense_category', 'amount', 'date', 'description'],
+                  required: ['expense_category', 'amount', 'date', 'description', 'transaction_type'],
                 },
               }],
             }],
@@ -106,6 +123,20 @@ export class GeminiLiveSession {
       const handleServerMessage = async (raw: string) => {
         try {
           const message = JSON.parse(raw) as LiveServerMessage;
+          if (message.usageMetadata) {
+            const usage = message.usageMetadata;
+            console.info('[Gemini Live] token usage', {
+              conversationId: this.conversationId,
+              inputTokens: usage.promptTokenCount,
+              outputTokens: usage.responseTokenCount,
+              totalTokens: usage.totalTokenCount,
+              cachedInputTokens: usage.cachedContentTokenCount,
+              toolInputTokens: usage.toolUsePromptTokenCount,
+              thinkingTokens: usage.thoughtsTokenCount,
+              inputByModality: usage.promptTokensDetails,
+              outputByModality: usage.responseTokensDetails,
+            });
+          }
           if (message.setupComplete) {
             if (!didSettle) {
               didSettle = true;
@@ -140,6 +171,7 @@ export class GeminiLiveSession {
           const serverContent = message.serverContent;
           if (!serverContent) return;
           if (serverContent.interrupted) {
+            this.playbackSuppressed = false;
             this.stopPlaybackQueue();
             this.callbacks.onInterrupted();
           }
@@ -167,7 +199,10 @@ export class GeminiLiveSession {
               this.playPcmChunk(inlineData.data, rate);
             }
           }
-          if (serverContent.turnComplete) this.callbacks.onTurnComplete();
+          if (serverContent.turnComplete) {
+            this.playbackSuppressed = false;
+            this.callbacks.onTurnComplete();
+          }
         } catch {
           this.callbacks.onError('Could not decode a Gemini Live server message.');
         }
@@ -213,6 +248,7 @@ export class GeminiLiveSession {
 
   close() {
     this.closed = true;
+    this.playbackSuppressed = true;
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
     }
@@ -221,7 +257,13 @@ export class GeminiLiveSession {
     GeminiLiveAudio.stop();
   }
 
+  interruptPlayback() {
+    this.playbackSuppressed = true;
+    this.stopPlaybackQueue();
+  }
+
   private playPcmChunk(encodedAudio: string, _sampleRate: number) {
+    if (this.playbackSuppressed) return;
     const bytes = decodeBase64(encodedAudio);
     if (!bytes.length) return;
     this.callbacks.onAudioStart();
@@ -241,30 +283,33 @@ export class GeminiLiveSession {
     const functionResponses = [];
     for (const functionCall of functionCalls) {
       try {
-        if (functionCall.name !== 'add_expense') {
+        if (functionCall.name !== 'add_entry') {
           throw new Error(`Unsupported function: ${functionCall.name}`);
         }
-        console.info('[Gemini Live] add_expense tool call received.');
+        console.info('[Gemini Live] add_entry tool call received.');
 
         const args = functionCall.args ?? {};
         const expenseCategory = args.expense_category;
         const amount = args.amount;
         const date = args.date;
         const description = args.description;
+        const transactionType = args.transaction_type;
         if (
           typeof expenseCategory !== 'string' || !expenseCategory.trim() ||
           typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 ||
           typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-          typeof description !== 'string'
+          typeof description !== 'string' ||
+          (transactionType !== 'expense' && transactionType !== 'income')
         ) {
-          throw new Error('Expense details are invalid or incomplete.');
+          throw new Error('Entry details are invalid or incomplete.');
         }
         const parsedDate = new Date(`${date}T00:00:00Z`);
         if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== date) {
           throw new Error('Expense date must be a valid date in YYYY-MM-DD format.');
         }
 
-        const result = await add_expense(expenseCategory, amount, date, description);
+        const result = await add_entry(expenseCategory, amount, date, description, transactionType);
+        await this.callbacks.onExpenseAdded();
         console.info('[Finance API] Expense request succeeded.');
         functionResponses.push({
           id: functionCall.id,

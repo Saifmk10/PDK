@@ -14,27 +14,27 @@ import {
 } from 'react-native';
 import { BlurView } from 'expo-blur';
 import * as SecureStore from 'expo-secure-store';
-import { requestRecordingPermissionsAsync, setAudioModeAsync, useAudioStream } from 'expo-audio';
-import type { AudioStreamBuffer } from 'expo-audio';
+import { requestRecordingPermissionsAsync } from 'expo-audio';
 import { colors, type } from '../theme/palette';
 import { resolveVoiceCommand } from '../voice/commands';
 import type { AppScreen } from '../voice/commands';
 import { GeminiLiveSession } from '../voice/geminiLiveSession';
+import { GeminiLiveAudio } from '../../modules/gemini-live-audio/src';
+import type { MicrophoneBuffer } from '../../modules/gemini-live-audio/src';
 
-type Props = { onNavigate: (screen: AppScreen) => void; autoStart?: boolean; onClose?: () => void };
+type Props = { onNavigate: (screen: AppScreen) => void; onExpenseAdded: () => Promise<void>; autoStart?: boolean; compact?: boolean; onClose?: () => void };
 type ApiTrace = { model?: string; finishReason?: string };
 
 const geminiApiKeyStorageName = 'personal-development-kit.gemini-api-key';
-// Grace period after the assistant stops talking before the mic is trusted again (avoids tail-end echo).
-const micCooldownMs = 400;
+const volumeUiIntervalMs = 50;
 
 function localeLabel(locale: string) {
   return locale.replace(/-/g, ' · ');
 }
 
-export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) {
+export function VoiceAssistantButton({ onNavigate, onExpenseAdded, autoStart, compact = false, onClose }: Props) {
   const { width: windowWidth } = useWindowDimensions();
-  const panelWidth = Math.min(windowWidth - 32, 410);
+  const panelWidth = compact ? 60 : Math.min(windowWidth - 32, 410);
   const [expanded, setExpanded] = useState(false);
   const [listening, setListening] = useState(false);
   const [modelSpeaking, setModelSpeaking] = useState(false);
@@ -47,25 +47,28 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
   const [feedback, setFeedback] = useState('Tap the orb and tell me where to go.');
   const [spokenText, setSpokenText] = useState('');
   const [assistantText, setAssistantText] = useState('');
+  const [transcriptVisible, setTranscriptVisible] = useState(false);
   const [apiTrace, setApiTrace] = useState<ApiTrace | null>(null);
-  const [volume, setVolume] = useState(0.45);
+  const [volume, setVolume] = useState(0);
   const expandedRef = useRef(false);
   const liveSession = useRef<GeminiLiveSession | null>(null);
   const liveConnecting = useRef(false);
-  const microphoneHandler = useRef<(buffer: AudioStreamBuffer) => void>(() => {});
-  // Without hardware echo cancellation, playback picked up by the mic would make the model reply to itself.
-  const micMutedUntil = useRef(0);
+  const microphoneAudioForwarding = useRef(false);
+  const microphoneHandler = useRef<(buffer: MicrophoneBuffer) => void>(() => {});
+  const lastVolumeUpdate = useRef(0);
   const expansion = useRef(new Animated.Value(0)).current;
   const thinkingDots = useRef([new Animated.Value(0.25), new Animated.Value(0.25), new Animated.Value(0.25)]).current;
   const thinkingLoops = useRef<Animated.CompositeAnimation[]>([]);
 
-  // Expo Audio delivers raw PCM; no platform speech recognizer sits between the mic and Gemini.
-  const { stream: microphoneStream } = useAudioStream({
-    sampleRate: 16_000,
-    channels: 1,
-    encoding: 'int16',
-    onBuffer: (buffer) => microphoneHandler.current(buffer),
-  });
+  useEffect(() => {
+    const subscription = GeminiLiveAudio.addListener('onMicrophoneBuffer', (buffer) => microphoneHandler.current(buffer));
+    return () => {
+      subscription.remove();
+      liveSession.current?.close();
+      liveSession.current = null;
+      GeminiLiveAudio.stopMicrophone();
+    };
+  }, []);
 
   // The orb and chat surface share one spring so the panel grows from the button naturally.
   useEffect(() => {
@@ -140,9 +143,7 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
       await SecureStore.deleteItemAsync(geminiApiKeyStorageName);
       setHasGeminiKey(false);
       setGeminiKeyInput('');
-      liveSession.current?.close();
-      liveSession.current = null;
-      microphoneStream.stop();
+      await stopLiveConversation();
       setListening(false);
       setModelSpeaking(false);
       setFeedback('Gemini key removed from this phone.');
@@ -152,9 +153,10 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
   }
 
   async function stopLiveConversation() {
+    microphoneAudioForwarding.current = false;
     liveSession.current?.close();
     liveSession.current = null;
-    microphoneStream.stop();
+    GeminiLiveAudio.stopMicrophone();
     setListening(false);
     setModelSpeaking(false);
     setThinking(false);
@@ -180,8 +182,8 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
         setAssistantText(message);
         return;
       }
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, interruptionMode: 'doNotMix' });
       const session = new GeminiLiveSession({
+        onExpenseAdded,
         onReady: () => {
           setApiTrace({ model: 'gemini-3.8-live', finishReason: 'CONNECTED' });
           setThinking(false);
@@ -201,20 +203,23 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
           setThinking(false);
         },
         onAudioStart: () => {
+          microphoneAudioForwarding.current = false;
+          setListening(false);
           setModelSpeaking(true);
           setThinking(false);
-          micMutedUntil.current = Number.POSITIVE_INFINITY;
         },
         onTurnComplete: () => {
+          microphoneAudioForwarding.current = true;
+          setListening(true);
           setModelSpeaking(false);
           setThinking(false);
-          micMutedUntil.current = Date.now() + micCooldownMs;
         },
         onInterrupted: () => {
+          microphoneAudioForwarding.current = true;
+          setListening(true);
           setModelSpeaking(false);
           setThinking(false);
-          micMutedUntil.current = Date.now() + micCooldownMs;
-          setFeedback('Listening · you can interrupt Gemini at any time');
+          setFeedback('Listening · speak now');
         },
         onError: (message) => {
           setFeedback(message);
@@ -225,9 +230,10 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
       });
       liveSession.current = session;
       setApiTrace({ model: 'gemini-3.8-live', finishReason: 'CONNECTING' });
-      micMutedUntil.current = 0;
+      setTranscriptVisible(false);
       await session.connect(apiKey);
-      await microphoneStream.start();
+      await GeminiLiveAudio.startMicrophone(16_000);
+      microphoneAudioForwarding.current = true;
       setListening(true);
       setThinking(false);
       setFeedback('Gemini Live · speak naturally in any supported language');
@@ -245,20 +251,34 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
     }
   }
 
-  // Forward microphone PCM directly to the Live WebSocket; no Android STT is involved.
+  // Forward echo-cancelled microphone PCM directly to the Live WebSocket.
   microphoneHandler.current = (buffer) => {
+    if (!microphoneAudioForwarding.current) return;
     const session = liveSession.current;
     if (!session) return;
-    if (Date.now() < micMutedUntil.current) return;
     const samples = new Int16Array(buffer.data);
     let energy = 0;
     for (let index = 0; index < samples.length; index += 1) {
       const sample = samples[index] / 32768;
       energy += sample * sample;
     }
-    setVolume(Math.min(1, Math.max(0.18, Math.sqrt(energy / Math.max(1, samples.length)) * 5)));
+    const now = Date.now();
+    if (now - lastVolumeUpdate.current >= volumeUiIntervalMs) {
+      lastVolumeUpdate.current = now;
+      setVolume(Math.min(1, Math.sqrt(energy / Math.max(1, samples.length)) * 8));
+    }
     session.sendMicrophoneAudio(buffer.data, buffer.sampleRate);
   };
+
+  function interruptGemini() {
+    const session = liveSession.current;
+    if (!modelSpeaking || !session) return;
+    session.interruptPlayback();
+    microphoneAudioForwarding.current = true;
+    setModelSpeaking(false);
+    setListening(true);
+    setFeedback('Listening · speak now');
+  }
 
   async function handleOrbPress() {
     if (liveConnecting.current) return;
@@ -276,13 +296,14 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
   }
 
   const animatedWidth = expansion.interpolate({ inputRange: [0, 1], outputRange: [60, panelWidth] });
-  const animatedHeight = expansion.interpolate({ inputRange: [0, 1], outputRange: [60, 222] });
-  const animatedRadius = expansion.interpolate({ inputRange: [0, 1], outputRange: [30, 19] });
+  const animatedHeight = expansion.interpolate({ inputRange: [0, 1], outputRange: [60, compact ? 60 : 294] });
+  const animatedRadius = expansion.interpolate({ inputRange: [0, 1], outputRange: [30, compact ? 30 : 19] });
   const detailsOpacity = expansion.interpolate({ inputRange: [0.35, 0.9], outputRange: [0, 1], extrapolate: 'clamp' });
-  const waveBars = [0.44, 0.78, 0.56, 1, 0.61, 0.88, 0.48, 0.72, 0.42];
+  const orbWaveBars = [0.25, 0.52, 0.82, 1, 0.72, 0.42, 0.2];
+  const waveBars = [0.18, 0.32, 0.56, 0.82, 0.47, 0.7, 1, 0.58, 0.34, 0.76, 0.5, 0.91, 0.42, 0.67, 0.3, 0.54, 0.22];
 
   return (
-    <View pointerEvents="box-none" style={styles.anchor}>
+    <View pointerEvents="box-none" style={[styles.anchor, compact && styles.compactAnchor]}>
       <Animated.View
         style={[
           styles.panel,
@@ -300,15 +321,15 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
           <View style={styles.topRow}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={listening ? 'Stop Gemini Live conversation' : 'Start Gemini Live conversation'}
-              onPress={() => void handleOrbPress()}
+              accessibilityLabel={modelSpeaking ? 'Press to interrupt Gemini and speak' : listening ? 'Stop Gemini Live conversation' : 'Start Gemini Live conversation'}
+              onPress={() => { if (modelSpeaking) interruptGemini(); else void handleOrbPress(); }}
               style={[styles.orb, listening && styles.orbListening]}
             >
               <View style={styles.orbInner}>
                 {listening || modelSpeaking ? (
                   <View style={styles.wave}>
-                    {waveBars.map((height, index) => (
-                      <WaveBar key={index} height={height} index={index} volume={volume} />
+                    {orbWaveBars.map((height, index) => (
+                      <WaveBar key={index} height={height} index={index} volume={volume} active={listening || modelSpeaking} compact />
                     ))}
                   </View>
                 ) : (
@@ -320,18 +341,34 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
                 )}
               </View>
             </Pressable>
-            <Animated.View style={[styles.statusBlock, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
+            {!compact ? <Animated.View style={[styles.statusBlock, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
               <Text style={styles.kicker}>{thinking ? 'CONNECTING' : modelSpeaking ? 'GEMINI SPEAKING' : listening ? 'GEMINI LIVE · LISTENING' : 'PERSONAL ASSISTANT'}</Text>
-              <Text numberOfLines={1} style={styles.statusText}>{thinking ? 'Opening live audio' : modelSpeaking ? 'Interrupt any time' : listening ? 'Speak naturally' : 'Your day, in your words'}</Text>
-            </Animated.View>
-            <Animated.View style={{ opacity: detailsOpacity }} pointerEvents={expanded ? 'auto' : 'none'}>
+              <Text numberOfLines={1} style={styles.statusText}>{thinking ? 'Opening live audio' : modelSpeaking ? 'Press to interrupt and speak' : listening ? 'Speak naturally' : 'Your day, in your words'}</Text>
+            </Animated.View> : null}
+            {!compact ? <Animated.View style={{ opacity: detailsOpacity }} pointerEvents={expanded ? 'auto' : 'none'}>
               <Pressable accessibilityLabel="Close assistant" onPress={() => { expandedRef.current = false; void stopLiveConversation(); setExpanded(false); onClose?.(); }} style={styles.closeButton}>
                 <Text style={styles.closeText}>×</Text>
               </Pressable>
-            </Animated.View>
+            </Animated.View> : null}
           </View>
-          <Animated.View style={[styles.conversation, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
-            {thinking ? (
+          {!compact ? <Animated.View style={[styles.conversation, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
+            {transcriptVisible ? (
+              <ScrollView nestedScrollEnabled contentContainerStyle={styles.chatStack} showsVerticalScrollIndicator={false}>
+                {spokenText ? <View style={styles.userBubble}><Text style={styles.userText}>{spokenText}</Text></View> : null}
+                {assistantText ? (
+                  <View style={styles.replyRow}>
+                    <View style={styles.assistantAvatar}><Text style={styles.avatarMark}>G</Text></View>
+                    <View style={styles.replyBubble}><Text style={styles.replyText}>{assistantText}</Text></View>
+                  </View>
+                ) : null}
+                {!spokenText && !assistantText ? <Text style={styles.hint}>Transcript will appear here.</Text> : null}
+                {apiTrace ? (
+                  <Text style={styles.apiTrace}>
+                    {`GEMINI LIVE · ${apiTrace.model ?? 'MODEL'} · ${apiTrace.finishReason ?? 'CONNECTED'}`}
+                  </Text>
+                ) : null}
+              </ScrollView>
+            ) : thinking ? (
               <View style={styles.thinkingRow}>
                 <View style={styles.assistantAvatar}><Text style={styles.avatarMark}>G</Text></View>
                 <View style={styles.thinkingBubble}>
@@ -341,41 +378,48 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
                   </View>
                 </View>
               </View>
-            ) : spokenText || assistantText ? (
-              <View style={styles.chatStack}>
-                {spokenText ? <View style={styles.userBubble}><Text style={styles.userText}>{spokenText}</Text></View> : null}
-                {assistantText ? (
-                  <View style={styles.replyRow}>
-                    <View style={styles.assistantAvatar}><Text style={styles.avatarMark}>G</Text></View>
-                    <View style={styles.replyBubble}><Text style={styles.replyText}>{assistantText}</Text></View>
-                  </View>
+            ) : listening || modelSpeaking ? (
+              <View style={styles.visualizer}>
+                <View style={styles.largeWave}>
+                  {waveBars.map((height, index) => (
+                    <WaveBar key={index} height={height} index={index} volume={volume} active />
+                  ))}
+                </View>
+                <Text style={styles.visualizerLabel}>{modelSpeaking ? 'GEMINI SPEAKING' : 'LISTENING · SPEAK NATURALLY'}</Text>
+                {modelSpeaking ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Press to interrupt Gemini and speak"
+                    onPress={interruptGemini}
+                    style={styles.interruptButton}
+                  >
+                    <Text style={styles.interruptButtonText}>PRESS TO INTERRUPT</Text>
+                  </Pressable>
                 ) : null}
-                {apiTrace ? (
-                  <Text style={styles.apiTrace}>
-                    {`GEMINI LIVE · ${apiTrace.model ?? 'MODEL'} · ${apiTrace.finishReason ?? 'CONNECTED'}`}
-                  </Text>
-                ) : null}
-              </View>
-            ) : listening ? (
-              <View style={styles.listeningRow}>
-                <View style={styles.livePulse} />
-                <Text style={styles.listeningCopy}>Live audio · language detection by Gemini</Text>
               </View>
             ) : (
               <Text style={styles.hint}>Tap the orb and speak. Gemini listens and replies in audio.</Text>
             )}
-          </Animated.View>
-          <Animated.View style={[styles.footer, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
+          </Animated.View> : null}
+          {!compact ? <Animated.View style={[styles.footer, { opacity: detailsOpacity }]} pointerEvents={expanded ? 'auto' : 'none'}>
             <Pressable onPress={() => setLanguagePickerOpen(true)} style={styles.languageButton}>
               <Text style={styles.languageLabel}>VOICE MODEL</Text>
               <Text numberOfLines={1} style={styles.languageValue}>{detectedLanguage}  ·  GEMINI LIVE</Text>
             </Pressable>
-            <Text style={styles.secureLabel}>DIRECT AUDIO</Text>
-          </Animated.View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={transcriptVisible ? 'Hide transcript' : 'Show transcript'}
+              accessibilityState={{ selected: transcriptVisible }}
+              onPress={() => setTranscriptVisible((visible) => !visible)}
+              style={styles.transcriptButton}
+            >
+              <Text style={styles.transcriptButtonText}>{transcriptVisible ? 'HIDE TEXT' : 'TRANSCRIPT'}</Text>
+            </Pressable>
+          </Animated.View> : null}
         </View>
       </Animated.View>
 
-      <Modal animationType="slide" onRequestClose={() => setLanguagePickerOpen(false)} transparent visible={languagePickerOpen}>
+      {!compact ? <Modal animationType="slide" onRequestClose={() => setLanguagePickerOpen(false)} transparent visible={languagePickerOpen}>
         <View style={styles.modalBackdrop}>
           <Pressable accessibilityLabel="Close language picker" onPress={() => setLanguagePickerOpen(false)} style={styles.scrim} />
           <View style={styles.languageSheet}>
@@ -408,15 +452,19 @@ export function VoiceAssistantButton({ onNavigate, autoStart, onClose }: Props) 
             <Text style={styles.modeDisclaimer}>The key is stored in Android encrypted app storage, not .env or the app bundle. Audio streams to Google. Use a restricted key and monitor Live API usage.</Text>
           </View>
         </View>
-      </Modal>
+      </Modal> : null}
       <Text accessibilityLiveRegion="polite" style={styles.hiddenStatus}>{feedback}</Text>
     </View>
   );
 }
 
-function WaveBar({ height, index, volume }: { height: number; index: number; volume: number }) {
+function WaveBar({ height, index, volume, active, compact = false }: { height: number; index: number; volume: number; active: boolean; compact?: boolean }) {
   const motion = useRef(new Animated.Value(0.3)).current;
   useEffect(() => {
+    if (!active) {
+      motion.setValue(0.14);
+      return;
+    }
     const loop = Animated.loop(Animated.sequence([
       Animated.delay(index * 45),
       Animated.timing(motion, { toValue: 1, duration: 180 + (index % 3) * 50, easing: Easing.inOut(Easing.sin), useNativeDriver: true }),
@@ -424,16 +472,18 @@ function WaveBar({ height, index, volume }: { height: number; index: number; vol
     ]));
     loop.start();
     return () => loop.stop();
-  }, [index, motion]);
+  }, [active, index, motion]);
 
   return (
     <Animated.View
       style={[
         styles.waveBar,
         {
-          height: 7 + height * 14 * volume,
+          height: 4 + height * (compact ? 14 : 54) * (active ? Math.max(volume, 0.08) : 0.03),
+          opacity: active ? 0.55 + Math.min(volume, 0.45) : 0.3,
           transform: [{ scaleY: motion }],
         },
+        compact && styles.orbWaveBar,
       ]}
     />
   );
@@ -441,6 +491,7 @@ function WaveBar({ height, index, volume }: { height: number; index: number; vol
 
 const styles = StyleSheet.create({
   anchor: { position: 'absolute', left: 16, bottom: 69, zIndex: 20, elevation: 20 },
+  compactAnchor: { left: 0, bottom: 0 },
   panel: {
     overflow: 'hidden',
     borderWidth: 1,
@@ -463,17 +514,23 @@ const styles = StyleSheet.create({
   glyphArc: { width: 16, height: 11, borderWidth: 1.5, borderTopWidth: 0, borderColor: colors.surface, borderBottomLeftRadius: 9, borderBottomRightRadius: 9 },
   glyphBase: { position: 'absolute', bottom: 0, height: 4, width: 1.5, backgroundColor: colors.surface },
   wave: { height: 22, flexDirection: 'row', alignItems: 'center', gap: 1.5 },
-  waveBar: { width: 2, minHeight: 4, borderRadius: 2, backgroundColor: colors.surface },
+  waveBar: { width: 3, minHeight: 4, borderRadius: 2, backgroundColor: colors.red },
+  orbWaveBar: { backgroundColor: colors.surface },
   statusBlock: { flex: 1, justifyContent: 'center', gap: 3 },
   kicker: { color: colors.red, fontFamily: type.mono, fontSize: 8, letterSpacing: 0.8 },
   statusText: { color: colors.ink, fontFamily: type.medium, fontSize: 12 },
   closeButton: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   closeText: { color: colors.ink, fontSize: 24, lineHeight: 27 },
-  conversation: { minHeight: 101, maxHeight: 112, paddingHorizontal: 6, paddingTop: 7, justifyContent: 'center' },
+  conversation: { flex: 1, minHeight: 150, maxHeight: 175, paddingHorizontal: 6, paddingTop: 7, justifyContent: 'center' },
   hint: { color: colors.muted, fontFamily: type.regular, fontSize: 12, lineHeight: 17 },
   listeningRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   livePulse: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.red },
   listeningCopy: { color: colors.muted, fontFamily: type.regular, fontSize: 12 },
+  visualizer: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(16,16,16,0.1)' },
+  largeWave: { height: 88, width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5 },
+  visualizerLabel: { color: colors.muted, fontFamily: type.mono, fontSize: 8, letterSpacing: 0.6, textAlign: 'center' },
+  interruptButton: { minHeight: 32, paddingHorizontal: 14, borderRadius: 6, backgroundColor: colors.red, alignItems: 'center', justifyContent: 'center' },
+  interruptButtonText: { color: colors.surface, fontFamily: type.mono, fontSize: 9, letterSpacing: 0.3 },
   chatStack: { gap: 7 },
   userBubble: { alignSelf: 'flex-end', maxWidth: '88%', borderRadius: 13, borderBottomRightRadius: 4, paddingHorizontal: 11, paddingVertical: 8, backgroundColor: 'rgba(20,20,20,0.91)' },
   userText: { color: colors.surface, fontFamily: type.regular, fontSize: 12, lineHeight: 16 },
@@ -488,8 +545,10 @@ const styles = StyleSheet.create({
   thinkingLabel: { color: colors.muted, fontFamily: type.regular, fontSize: 11 },
   dots: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   thinkingDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: colors.red },
-  footer: { minHeight: 35, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(16,16,16,0.12)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 3 },
-  languageButton: { flexDirection: 'row', alignItems: 'center', gap: 7, maxWidth: '75%' },
+  footer: { minHeight: 38, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: 'rgba(16,16,16,0.12)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 3, gap: 8 },
+  languageButton: { flexDirection: 'row', alignItems: 'center', gap: 7, maxWidth: '66%' },
+  transcriptButton: { minHeight: 30, paddingHorizontal: 9, borderWidth: 1, borderColor: colors.line, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
+  transcriptButtonText: { color: colors.ink, fontFamily: type.mono, fontSize: 8, letterSpacing: 0.3 },
   languageLabel: { color: colors.muted, fontFamily: type.mono, fontSize: 8, letterSpacing: 0.4 },
   languageValue: { color: colors.ink, fontFamily: type.medium, fontSize: 10, maxWidth: 130 },
   secureLabel: { color: colors.muted, fontFamily: type.mono, fontSize: 7, letterSpacing: 0.4 },

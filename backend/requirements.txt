@@ -1,2 +1,4 @@
 fastapi
 uvicorn[standard]
+pinecone>=10
+python-dotenv
